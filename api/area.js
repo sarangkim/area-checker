@@ -44,7 +44,7 @@ export default async function handler(req, res) {
     // 2) 건축HUB 전유공용면적(호별면적 포함) 조회
     // serviceKey는 "일반 인증키(Decoding)"를 환경변수에 넣는 걸 권장
     const hubUrl = new URL("https://apis.data.go.kr/1613000/BldRgstHubService/getBrAtchJibunInfo");
-    hubUrl.searchParams.set("serviceKey", encodeURIComponent(process.env.BLD_KEY));
+    hubUrl.searchParams.set("serviceKey", process.env.BLD_KEY);
     hubUrl.searchParams.set("sigunguCd", sigunguCd);
     hubUrl.searchParams.set("bjdongCd", bjdongCd);
     hubUrl.searchParams.set("bun", bun);

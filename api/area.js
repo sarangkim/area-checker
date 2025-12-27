@@ -74,13 +74,21 @@ export default async function handler(req, res) {
        3) 전유부 상세 (면적!)
        getBrBasisOulnInfo
     ========================= */
-    const detailUrl = new URL(
+  const detailUrl = new URL(
       "https://apis.data.go.kr/1613000/BldRgstHubService/getBrBasisOulnInfo"
     );
     detailUrl.searchParams.set("serviceKey", process.env.BLD_KEY);
     detailUrl.searchParams.set("mgmBldrgstPk", mgmBldrgstPk);
+    
+    // ★ 반드시 같이 넣어야 함
+    detailUrl.searchParams.set("sigunguCd", sigunguCd);
+    detailUrl.searchParams.set("bjdongCd", bjdongCd);
+    detailUrl.searchParams.set("bun", bun);
+    detailUrl.searchParams.set("ji", ji);
+    
     detailUrl.searchParams.set("numOfRows", "1");
     detailUrl.searchParams.set("pageNo", "1");
+
 
     const detailRes = await fetch(detailUrl.toString());
     const detailXml = await detailRes.text();

@@ -73,7 +73,7 @@ export default async function handler(req, res) {
           debugItemRaw: raw
         });
       }
-    }
+    
 
     const areaPyeong = areaM2 / 3.305785;
 

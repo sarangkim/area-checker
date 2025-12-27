@@ -64,18 +64,15 @@ export default async function handler(req, res) {
 
     // 3) 면적 자동 탐지 (핵심 수정)
     const areaM2 = getAreaM2(target);
-    if (!areaM2) {
-      // 디버그: 어떤 태그들이 있나 힌트 제공
-      const sampleTags = ["excluUseAr", "area", "totArea", "totAr", "flrArea", "etcArea", "archArea"];
-      return res.status(500).json({
-        ok: false,
-        message: "면적 필드를 찾지 못했습니다. (응답 필드명이 area가 아닐 수 있음)",
-        foundTags: sampleTags.reduce((acc, t) => {
-          const v = getTag(target, t);
-          if (v) acc[t] = v;
-          return acc;
-        }, {}),
-      });
+       if (!areaM2) {
+        // item 원문 일부를 같이 내려서 실제 태그명을 확인
+        const raw = target.slice(0, 1500);
+        return res.status(500).json({
+          ok: false,
+          message: "면적 필드를 찾지 못했습니다. item 원문 일부를 확인해 태그명을 확정해야 합니다.",
+          debugItemRaw: raw
+        });
+      }
     }
 
     const areaPyeong = areaM2 / 3.305785;

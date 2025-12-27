@@ -1,196 +1,184 @@
-// api/area.js
+// /api/area.js
 export default async function handler(req, res) {
-  // CORS
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "GET, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
   if (req.method === "OPTIONS") return res.status(204).end();
 
-  const BUILD = "2025-12-27-B-01";
+  const BUILD = "2025-12-27-HO-01";
 
-  const address = (req.query.address || "").trim(); // 도로명/지번
-  const floor = String(req.query.floor || "").trim(); // 예: 3
-  const hoInput = (req.query.ho || "").trim(); // 예: 501 or 501호 (선택)
+  const address = (req.query.address || "").trim();
+  const floor = String(req.query.floor || "").trim(); // 예: "12"
+  const hoInput = (req.query.ho || "").trim();        // 예: "1209" 또는 "1209호"
 
   if (!address || !floor) {
-    return res.status(400).json({ ok: false, message: "address와 floor는 필수입니다." });
+    return res.status(400).json({ ok: false, build: BUILD, message: "address와 floor는 필수입니다." });
   }
 
   try {
-    // =========================
-    // 1) JUSO 검색: 주소 → 지번코드(sigungu/bjdong/bun/ji)
-    // =========================
-    const juso = await jusoSearch(address);
+    // 0) 입력 정규화
+    const wantHo = hoInput
+      ? (hoInput.endsWith("호") ? hoInput : `${hoInput}호`)
+      : null;
+
+    // 1) JUSO: 도로명주소 -> 지번코드(시군구/법정동/번/지)
+    const juso = await fetchJuso(address);
 
     const sigunguCd = juso.sigunguCd;
     const bjdongCd = juso.bjdongCd;
     const bun = juso.bun;
     const ji = juso.ji;
 
-    const wantHo = hoInput ? (hoInput.endsWith("호") ? hoInput : `${hoInput}호`) : null;
+    const baseKeys = { sigunguCd, bjdongCd, bun, ji };
 
-    // =========================
-    // 2) 1차 시도: 전유부 목록(getBrExposInfo) → (층/호 매칭) → mgmBldrgstPk 확보
-    // =========================
-    const exposListXml = await callBldHub("getBrExposInfo", {
-      sigunguCd, bjdongCd, bun, ji,
-      numOfRows: "5000",
-      pageNo: "1",
-    });
+    // 2) (호별 우선) 전유부 목록(getBrExposInfo)에서 "층/호"를 찾아 mgmBldrgstPk 확보
+    let exposTarget = null;
+    let exposListMeta = null;
 
-    const exposItems = extractItems(exposListXml);
-    if (exposItems.length) {
-      const picked = exposItems.find(it => {
-        const flrNo = getTag(it, "flrNo"); // 층
-        const hoNm = getTag(it, "hoNm");   // 호
-        if (String(flrNo) !== String(floor)) return false;
-        if (wantHo && hoNm !== wantHo) return false;
-        return true;
+    if (wantHo) {
+      const expos = await fetchExposInfoTryPlatGb(baseKeys);
+      exposListMeta = expos.meta;
+
+      exposTarget = expos.items.find(it => {
+        const flrNo = getTag(it, "flrNo");
+        const hoNm = getTag(it, "hoNm");
+        return String(flrNo) === String(floor) && hoNm === wantHo;
       });
 
-      if (picked) {
-        const mgmBldrgstPk = getTag(picked, "mgmBldrgstPk");
-
-        // =========================
-        // 3) 2차 시도: 전유공용면적(getBrExposPubuseAreaInfo) 호출
-        //    - 앱의 "전유/공유 현황"에 해당할 확률이 가장 큼
-        //    - 문서마다 파라미터가 다를 수 있어, 가능한 키들은 최대한 넣어봄
-        // =========================
-        if (mgmBldrgstPk) {
-          const pubuseXml = await callBldHub("getBrExposPubuseAreaInfo", {
-            sigunguCd, bjdongCd, bun, ji,
-            mgmBldrgstPk, // ⭐ 핵심(전유부 PK)
-            numOfRows: "100",
-            pageNo: "1",
+      // ✅ exposInfo에 전유면적(excluUseAr)이 직접 있을 때도 있음 (바로 사용 가능)
+      if (exposTarget) {
+        const directArea = pickNumberByTags(exposTarget, [
+          "excluUseAr", "excluAr", "area", "totArea", "totAr"
+        ]);
+        if (directArea > 0) {
+          const areaP = toPyeong(directArea);
+          return res.status(200).json({
+            ok: true,
+            build: BUILD,
+            mode: "exposInfo direct (호별 전유면적)",
+            input: { address, floor, ho: hoInput || null },
+            jibun: juso.jibunAddr,
+            road: juso.roadAddr,
+            keys: baseKeys,
+            hoNm: wantHo,
+            area_m2: round2(directArea),
+            area_pyeong: round2(areaP),
+            note: "전유부(getBrExposInfo) 응답에 전유면적 태그가 포함되어 직접 사용했습니다."
           });
-
-          const pubuseItem = extractFirstItem(pubuseXml);
-          if (pubuseItem) {
-            // 전유면적/공용면적 후보 태그들 (문서마다 조금씩 다를 수 있음)
-            const excluM2 = pickNumber(pubuseItem, [
-              "excluUseAr", "excluUseArea", "excluAr", "prvuseArea", "prvUseAr"
-            ]);
-            const pubuseM2 = pickNumber(pubuseItem, [
-              "pubuseAr", "pubuseArea", "commUseAr", "commUseArea"
-            ]);
-
-            // 1) 전유면적이 잡히면 그걸 “호별(또는 해당 단위) 전유면적”로 채택
-            if (excluM2 > 0) {
-              return res.status(200).json({
-                ok: true,
-                build: BUILD,
-                mode: "exposPubuseArea (호/단위 우선)",
-                input: { address, floor, ho: hoInput || null },
-                jibun: juso.jibunAddr,
-                road: juso.roadAddr,
-                keys: { sigunguCd, bjdongCd, bun, ji, mgmBldrgstPk },
-                area_m2: excluM2,
-                area_pyeong: toPyeong(excluM2),
-                // 참고: 공용면적도 잡히면 같이 내려줌
-                shared_m2: pubuseM2 > 0 ? pubuseM2 : null,
-                shared_pyeong: pubuseM2 > 0 ? toPyeong(pubuseM2) : null,
-              });
-            }
-
-            // 2) 전유면적이 없고 공용만 있거나, 태그명이 다르면 디버그 제공 후 층별로 폴백
-          }
         }
       }
     }
 
-    // =========================
-    // 4) 폴백: 층별개요(getBrFlrOulnInfo)로 “해당 층 면적” 찾기
-    // =========================
-    const flrXml = await callBldHub("getBrFlrOulnInfo", {
-      sigunguCd, bjdongCd, bun, ji,
-      numOfRows: "5000",
-      pageNo: "1",
-    });
+    // 3) (호별) PK가 있으면 전유/공유면적(getBrExposPubuseAreaInfo)에서 전유면적 찾기
+    if (wantHo && exposTarget) {
+      const mgmBldrgstPk = getTag(exposTarget, "mgmBldrgstPk") || "";
 
-    const flrItems = extractItems(flrXml);
-    if (!flrItems.length) {
+      // PK가 없으면 호별 면적 조회가 거의 불가능
+      if (!mgmBldrgstPk) {
+        // 호별 실패 → 층별 fallback
+        const flr = await fetchFlrOuln(baseKeys, floor);
+        return res.status(200).json({
+          ok: true,
+          build: BUILD,
+          mode: "flrOuln fallback (층 면적) - 호 PK 없음",
+          input: { address, floor, ho: hoInput || null },
+          jibun: juso.jibunAddr,
+          road: juso.roadAddr,
+          keys: baseKeys,
+          area_m2: round2(flr.areaM2),
+          area_pyeong: round2(toPyeong(flr.areaM2)),
+          note: "전유부 PK(mgmBldrgstPk)가 없어 호별 전유면적 조회가 불가하여 층면적으로 대체했습니다."
+        });
+      }
+
+      const pubuse = await fetchExposPubuseArea({ ...baseKeys, mgmBldrgstPk });
+
+      // ✅ '전유' 행을 우선으로 찾기
+      // 응답에 구분 태그가 다양한데, 보통 exposSeCdNm / exposSeCd / seNm 같은게 있음
+      const jeonyuItem = pubuse.items.find(it => {
+        const s1 = getTag(it, "exposSeCdNm") || getTag(it, "exposSeNm") || getTag(it, "seNm");
+        return (s1 || "").includes("전유");
+      }) || pubuse.items[0]; // 전유가 명확히 없으면 첫 item이라도 시도
+
+      const areaM2 = pickNumberByTags(jeonyuItem, [
+        "excluUseAr", "excluAr", "area", "totArea", "totAr"
+      ]);
+
+      if (areaM2 > 0) {
+        return res.status(200).json({
+          ok: true,
+          build: BUILD,
+          mode: "exposPubuseArea (호별 전유면적)",
+          input: { address, floor, ho: hoInput || null },
+          jibun: juso.jibunAddr,
+          road: juso.roadAddr,
+          keys: baseKeys,
+          mgmBldrgstPk,
+          hoNm: wantHo,
+          area_m2: round2(areaM2),
+          area_pyeong: round2(toPyeong(areaM2)),
+          note: "호별 전유면적을 전유/공유면적(getBrExposPubuseAreaInfo)에서 추출했습니다."
+        });
+      }
+
+      // 호별 조회는 됐는데 면적 태그를 못 찾는 경우 → 디버그 노출(키 제외)
       return res.status(500).json({
         ok: false,
         build: BUILD,
-        message: "층별개요(getBrFlrOulnInfo) item이 없습니다.",
-        debug: debugHead(flrXml),
+        message: "호별 데이터는 찾았지만(전유/공유), 면적 태그를 찾지 못했습니다. 태그명이 다른 케이스입니다.",
+        debug: {
+          address, floor, wantHo,
+          keys: baseKeys,
+          mgmBldrgstPk,
+          exposFound: true,
+          exposTagsPreview: previewTags(exposTarget),
+          pubuseFirstItemPreview: pubuse.items[0] ? pubuse.items[0].slice(0, 900) : "(no item)",
+          totalCount: pubuse.meta.totalCount,
+          resultCode: pubuse.meta.resultCode,
+          resultMsg: pubuse.meta.resultMsg
+        }
       });
     }
 
-    // 층 매칭: flrNo / flrNm / flrGbCdNm 등 케이스별로 대비
-    const floorItem = flrItems.find(it => {
-      const flrNo = getTag(it, "flrNo");
-      const flrNm = getTag(it, "flrNm"); // 어떤 데이터는 "3층" 같은 텍스트
-      if (flrNo && String(flrNo) === String(floor)) return true;
-      if (flrNm && String(flrNm).includes(String(floor))) return true;
-      return false;
-    });
-
-    if (!floorItem) {
-      return res.status(404).json({
-        ok: false,
-        build: BUILD,
-        message: "층별개요에서 해당 층을 찾지 못했습니다. (floor 확인)",
-        sample: flrItems.slice(0, 10).map(it => ({
-          flrNo: getTag(it, "flrNo"),
-          flrNm: getTag(it, "flrNm"),
-          use: getTag(it, "mainPurpsCdNm") || getTag(it, "etcPurps") || "",
-        })),
-      });
-    }
-
-    // 층 면적 태그 후보들 (문서/데이터마다 다름)
-    const flrAreaM2 = pickNumber(floorItem, [
-      "area", "flrArea", "totArea", "useAr", "useArea",
-      "excluUseAr", "excluUseArea", // 혹시 층에 전유가 들어오는 케이스
-    ]);
-
-    if (!(flrAreaM2 > 0)) {
-      return res.status(500).json({
-        ok: false,
-        build: BUILD,
-        message: "층별개요 item은 있는데 면적 태그를 찾지 못했습니다. 태그명 확인 필요",
-        itemHead: floorItem.slice(0, 1200),
-      });
-    }
-
+    // 4) (층별 fallback) 호 입력이 없거나, 호를 못 찾으면 층별(getBrFlrOulnInfo)
+    const flr = await fetchFlrOuln(baseKeys, floor);
     return res.status(200).json({
       ok: true,
       build: BUILD,
-      mode: "flrOuln fallback (층 면적)",
+      mode: "flrOuln (층 면적)",
       input: { address, floor, ho: hoInput || null },
       jibun: juso.jibunAddr,
       road: juso.roadAddr,
-      keys: { sigunguCd, bjdongCd, bun, ji },
-      area_m2: flrAreaM2,
-      area_pyeong: toPyeong(flrAreaM2),
-      note: "호별 전유면적이 공개 API에서 미제공/미등재인 경우, 층별 면적으로 대체합니다.",
+      keys: baseKeys,
+      area_m2: round2(flr.areaM2),
+      area_pyeong: round2(toPyeong(flr.areaM2)),
+      note: wantHo
+        ? "호별 전유면적 데이터를 공공API에서 찾지 못해 층 면적으로 대체했습니다."
+        : "층별 면적을 반환했습니다."
     });
 
   } catch (e) {
-    return res.status(500).json({ ok: false, build: BUILD, message: e.message });
+    return res.status(500).json({ ok: false, message: e.message });
   }
 }
 
-/* =========================
-   JUSO: 주소검색
-========================= */
-async function jusoSearch(keyword) {
-  const url = new URL("https://business.juso.go.kr/addrlink/addrLinkApi.do");
-  url.searchParams.set("confmKey", process.env.JUSO_KEY);
-  url.searchParams.set("currentPage", "1");
-  url.searchParams.set("countPerPage", "10");
-  url.searchParams.set("keyword", keyword);
-  url.searchParams.set("resultType", "json");
+/* ---------------- helpers ---------------- */
 
-  const r = await fetch(url.toString());
-  const data = await r.json();
-  const list = data?.results?.juso || [];
-  if (!list.length) throw new Error("주소 검색 결과가 없습니다. (JUSO)");
+async function fetchJuso(address) {
+  const jusoUrl = new URL("https://business.juso.go.kr/addrlink/addrLinkApi.do");
+  jusoUrl.searchParams.set("confmKey", process.env.JUSO_KEY);
+  jusoUrl.searchParams.set("currentPage", "1");
+  jusoUrl.searchParams.set("countPerPage", "10");
+  jusoUrl.searchParams.set("keyword", address);
+  jusoUrl.searchParams.set("resultType", "json");
 
-  const j = list[0];
-  const admCd = j.admCd || "";
-  if (admCd.length < 10) throw new Error("JUSO 응답 admCd가 비정상입니다.");
+  const jusoRes = await fetch(jusoUrl.toString());
+  const jusoData = await jusoRes.json();
+  const jusoList = jusoData?.results?.juso || [];
+  if (!jusoList.length) throw new Error("주소 검색 결과가 없습니다(JUSO).");
+
+  const j = jusoList[0];
+  const admCd = j.admCd;
 
   const sigunguCd = admCd.slice(0, 5);
   const bjdongCd = admCd.slice(5, 10);
@@ -199,62 +187,147 @@ async function jusoSearch(keyword) {
 
   return {
     sigunguCd, bjdongCd, bun, ji,
-    jibunAddr: j.jibunAddr,
-    roadAddr: j.roadAddrPart1,
+    jibunAddr: j.jibunAddr || "",
+    roadAddr: j.roadAddr || ""
   };
 }
 
-/* =========================
-   건축HUB 호출 공통
-========================= */
-async function callBldHub(operation, params) {
-  const url = new URL(`https://apis.data.go.kr/1613000/BldRgstHubService/${operation}`);
-  url.searchParams.set("serviceKey", process.env.BLD_KEY);
-
-  for (const [k, v] of Object.entries(params)) {
-    if (v !== undefined && v !== null && String(v).length) url.searchParams.set(k, String(v));
+// serviceKey 인코딩/디코딩 이슈 대응:
+// - env에 "디코딩키(원본키)"를 넣는게 가장 좋음
+// - 만약 env에 이미 %2F 같은게 들어간 "인코딩키"라면 searchParams.set을 쓰면 %가 %25로 재인코딩됨 -> 깨짐
+// 그래서: 키가 이미 인코딩된 형태면 URL에 그대로 붙인다.
+function addServiceKey(urlObj, key) {
+  const keyStr = String(key || "").trim();
+  if (!keyStr) return urlObj;
+  const looksEncoded = /%[0-9A-Fa-f]{2}/.test(keyStr);
+  if (!looksEncoded) {
+    urlObj.searchParams.set("serviceKey", keyStr);
+    return urlObj;
   }
-
-  const r = await fetch(url.toString());
-  const text = await r.text();
-
-  // “API not found” 방지: 존재하는 오퍼레이션만 쓰면 여기 걸릴 일 없음
-  if (text.includes("API not found")) {
-    throw new Error(`API not found: ${operation} (오퍼레이션명 확인 필요)`);
-  }
-  return text;
+  const base = urlObj.toString();
+  const sep = base.includes("?") ? "&" : "?";
+  return new URL(base + sep + "serviceKey=" + keyStr);
 }
 
-/* =========================
-   XML 파싱 유틸
-========================= */
-function extractItems(xmlText) {
-  return [...xmlText.matchAll(/<item>([\s\S]*?)<\/item>/g)].map(m => m[1]);
+async function fetchXml(urlObj) {
+  const res = await fetch(urlObj.toString());
+  const xml = await res.text();
+  return { res, xml };
 }
-function extractFirstItem(xmlText) {
-  return xmlText.match(/<item>([\s\S]*?)<\/item>/)?.[1] || "";
+
+function parseMeta(xml) {
+  const totalCount = xml.match(/<totalCount>(\d+)<\/totalCount>/)?.[1] || "";
+  const resultCode = xml.match(/<resultCode>(.*?)<\/resultCode>/)?.[1]?.trim() || "";
+  const resultMsg = xml.match(/<resultMsg>(.*?)<\/resultMsg>/)?.[1]?.trim() || "";
+  return { totalCount, resultCode, resultMsg };
 }
+
+function parseItems(xml) {
+  return [...xml.matchAll(/<item>([\s\S]*?)<\/item>/g)].map(m => m[1]);
+}
+
 function getTag(xmlChunk, tag) {
   const m = xmlChunk.match(new RegExp(`<${tag}>([\\s\\S]*?)<\\/${tag}>`));
   return m?.[1]?.trim() || "";
 }
-function pickNumber(xmlChunk, tags) {
-  for (const t of tags) {
-    const v = getTag(xmlChunk, t);
+
+function pickNumberByTags(itemXml, candidates) {
+  for (const t of candidates) {
+    const v = getTag(itemXml, t);
     const n = Number(v);
     if (Number.isFinite(n) && n > 0) return n;
   }
-  // area/Ar/Area 비슷한 숫자 태그 자동 스캔(최후수단)
-  const candidates = [...xmlChunk.matchAll(/<([a-zA-Z0-9_]+)>([\d.]+)<\/\1>/g)]
-    .map(m => ({ tag: m[1], val: Number(m[2]) }))
-    .filter(x => Number.isFinite(x.val) && x.val > 0 && /ar|area|Ar|Area/.test(x.tag));
-
-  if (candidates.length) return candidates[0].val;
   return 0;
 }
+
 function toPyeong(m2) {
-  return Number((m2 / 3.305785).toFixed(2));
+  return Number(m2) / 3.305785;
 }
-function debugHead(xmlText) {
-  return { head: xmlText.slice(0, 800) };
+
+function round2(n) {
+  return Number(Number(n).toFixed(2));
+}
+
+function previewTags(itemXml) {
+  // itemXml 앞부분에서 태그명 몇 개만 뽑아보기 (디버그용)
+  const tags = [...itemXml.matchAll(/<([a-zA-Z0-9_]+)>/g)].map(m => m[1]);
+  const uniq = [...new Set(tags)];
+  return uniq.slice(0, 40);
+}
+
+/* ------------ 건축HUB 호출들 ------------ */
+
+// 전유부 목록: getBrExposInfo
+// 어떤 지번은 platGbCd(대지/산) 영향이 있어서 0/1 둘 다 시도
+async function fetchExposInfoTryPlatGb(keys) {
+  const tried = [];
+  for (const platGbCd of ["0", "1"]) {
+    const u0 = new URL("https://apis.data.go.kr/1613000/BldRgstHubService/getBrExposInfo");
+    const u = addServiceKey(u0, process.env.BLD_KEY);
+
+    u.searchParams.set("sigunguCd", keys.sigunguCd);
+    u.searchParams.set("bjdongCd", keys.bjdongCd);
+    u.searchParams.set("bun", keys.bun);
+    u.searchParams.set("ji", keys.ji);
+    u.searchParams.set("platGbCd", platGbCd);
+    u.searchParams.set("numOfRows", "5000");
+    u.searchParams.set("pageNo", "1");
+
+    const { xml } = await fetchXml(u);
+    const meta = parseMeta(xml);
+    const items = parseItems(xml);
+
+    tried.push({ platGbCd, itemsCount: items.length, meta });
+
+    if (items.length) {
+      return { items, meta: { ...meta, tried } };
+    }
+  }
+  return { items: [], meta: { tried } };
+}
+
+// 전유/공유 면적: getBrExposPubuseAreaInfo (호별 전유면적용)
+async function fetchExposPubuseArea(params) {
+  const u0 = new URL("https://apis.data.go.kr/1613000/BldRgstHubService/getBrExposPubuseAreaInfo");
+  const u = addServiceKey(u0, process.env.BLD_KEY);
+
+  u.searchParams.set("sigunguCd", params.sigunguCd);
+  u.searchParams.set("bjdongCd", params.bjdongCd);
+  u.searchParams.set("bun", params.bun);
+  u.searchParams.set("ji", params.ji);
+  u.searchParams.set("mgmBldrgstPk", params.mgmBldrgstPk);
+  u.searchParams.set("numOfRows", "100");
+  u.searchParams.set("pageNo", "1");
+
+  const { xml } = await fetchXml(u);
+  const meta = parseMeta(xml);
+  const items = parseItems(xml);
+  return { items, meta };
+}
+
+// 층별 개요: getBrFlrOulnInfo (fallback/층면적)
+async function fetchFlrOuln(keys, floor) {
+  const u0 = new URL("https://apis.data.go.kr/1613000/BldRgstHubService/getBrFlrOulnInfo");
+  const u = addServiceKey(u0, process.env.BLD_KEY);
+
+  u.searchParams.set("sigunguCd", keys.sigunguCd);
+  u.searchParams.set("bjdongCd", keys.bjdongCd);
+  u.searchParams.set("bun", keys.bun);
+  u.searchParams.set("ji", keys.ji);
+  u.searchParams.set("numOfRows", "5000");
+  u.searchParams.set("pageNo", "1");
+
+  const { xml } = await fetchXml(u);
+  const items = parseItems(xml);
+  if (!items.length) throw new Error("층별(getBrFlrOulnInfo) 데이터가 없습니다.");
+
+  // 층 매칭: flrNo 태그가 보통 있음
+  const target = items.find(it => String(getTag(it, "flrNo")) === String(floor));
+  if (!target) throw new Error("요청한 층(flrNo)에 해당하는 층별 데이터가 없습니다.");
+
+  // 층 면적 태그 후보들
+  const areaM2 = pickNumberByTags(target, ["area", "flrArea", "totArea", "totAr"]);
+  if (!areaM2) throw new Error("층별 면적 태그를 찾지 못했습니다(getBrFlrOulnInfo).");
+
+  return { areaM2 };
 }

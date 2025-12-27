@@ -67,34 +67,62 @@ export default async function handler(req, res) {
     const pick = pickBestFloorItem(floorItems);
 
     // ------------------------------------------------------------
-    // 3) 호별 요청이 없으면: 층 item 목록 + pick 면적으로 응답
+    // 3) 호별 요청이 없으면: 층 item 목록 + pick + ho_list(드롭다운용)
     // ------------------------------------------------------------
     if (!hoInput) {
-      if (!floorItems.length) {
-        return res.status(200).json({
-          ok: true,
-          build: BUILD,
-          mode: "floorItems",
-          input: { address, floor, ho: null },
-          jibun: j.jibunAddr,
-          road: j.roadAddr,
-          keys: baseKeys,
-          floor_items: [],
-          pick: null,
-          note: "해당 층 item이 없습니다.",
+      // (A) 층 item이 없는 경우도 호목록은 있을 수 있으니, floor_items는 그대로
+      let hoList = [];
+      let hoNote = "";
+    
+      try {
+        // 해당 주소 전체 전유부 목록 → floor만 필터 → hoNm 모으기
+        const exposUrl = new URL("https://apis.data.go.kr/1613000/BldRgstHubService/getBrExposInfo");
+        exposUrl.searchParams.set("serviceKey", process.env.BLD_KEY);
+        exposUrl.searchParams.set("sigunguCd", sigunguCd);
+        exposUrl.searchParams.set("bjdongCd", bjdongCd);
+        exposUrl.searchParams.set("bun", bun);
+        exposUrl.searchParams.set("ji", ji);
+        exposUrl.searchParams.set("numOfRows", "9999");
+        exposUrl.searchParams.set("pageNo", "1");
+    
+        const exposXml = await (await fetch(exposUrl.toString())).text();
+        assertApiOk(exposXml, "getBrExposInfo");
+    
+        const exposItems = parseItems(exposXml).map(itemXmlToObj);
+    
+        // 층 필터 + hoNm 수집
+        const rawHos = exposItems
+          .filter(it => String(it.flrNo || "") === String(floor))
+          .map(it => (it.hoNm || "").trim())
+          .filter(Boolean);
+    
+        // 중복 제거 + 정렬(숫자 기준)
+        const uniq = [...new Set(rawHos)];
+        hoList = uniq.sort((a, b) => {
+          const na = Number(normalizeHo(a)) || 0;
+          const nb = Number(normalizeHo(b)) || 0;
+          if (na !== nb) return na - nb;
+          return a.localeCompare(b, "ko");
         });
+    
+        if (!hoList.length) hoNote = "해당 층에서 호 목록을 찾지 못했습니다.";
+      } catch (e) {
+        // 호 목록 조회 실패해도 층 면적은 보여주도록, note만 남김
+        hoNote = `호 목록 조회 실패: ${e.message}`;
       }
-
+    
       return res.status(200).json({
         ok: true,
         build: BUILD,
-        mode: "floorItems",
+        mode: "floorItems+hoList",
         input: { address, floor, ho: null },
         jibun: j.jibunAddr,
         road: j.roadAddr,
         keys: baseKeys,
         floor_items: floorItems.map(toClientFloorItem),
         pick: pick ? toClientFloorItem(pick) : null,
+        ho_list: hoList,          // ✅ 프론트 드롭다운에 바로 씀
+        ho_list_note: hoNote,     // ✅ 안 나오면 이유 표시용
       });
     }
 

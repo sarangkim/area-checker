@@ -6,14 +6,14 @@ export default async function handler(req, res) {
 
   const address = (req.query.address || "").trim();
   const floor = String(req.query.floor || "").trim();
-  const hoInput = (req.query.ho || "").trim(); // 선택
+  const hoInput = (req.query.ho || "").trim();
 
   if (!address || !floor) {
     return res.status(400).json({ ok: false, message: "address와 floor는 필수입니다." });
   }
 
   try {
-    /* 1) JUSO 주소 → 지번 */
+    // 1) JUSO 주소 → 지번
     const jusoUrl = new URL("https://business.juso.go.kr/addrlink/addrLinkApi.do");
     jusoUrl.searchParams.set("confmKey", process.env.JUSO_KEY);
     jusoUrl.searchParams.set("currentPage", "1");
@@ -26,20 +26,17 @@ export default async function handler(req, res) {
     const jusoList = jusoData?.results?.juso || [];
     if (!jusoList.length) throw new Error("주소 검색 결과가 없습니다.");
 
-    // 가장 일치하는 지번 선택
     const j = jusoList[0];
-
     const admCd = j.admCd;
+
     const sigunguCd = admCd.slice(0, 5);
     const bjdongCd = admCd.slice(5, 10);
     const bun = String(j.lnbrMnnm).padStart(4, "0");
     const ji = String(j.lnbrSlno).padStart(4, "0");
 
-    /* 2) 전유부(호별) 조회 – ★ 핵심 엔드포인트 */
-    const exposUrl = new URL(
-      "https://apis.data.go.kr/1613000/BldRgstHubService/getBrExposInfo"
-    );
-    exposUrl.searchParams.set("serviceKey", process.env.BLD_KEY); // 디코딩 키, 인코딩 금지
+    // 2) 전유부(호별) 조회
+    const exposUrl = new URL("https://apis.data.go.kr/1613000/BldRgstHubService/getBrExposInfo");
+    exposUrl.searchParams.set("serviceKey", process.env.BLD_KEY);
     exposUrl.searchParams.set("sigunguCd", sigunguCd);
     exposUrl.searchParams.set("bjdongCd", bjdongCd);
     exposUrl.searchParams.set("bun", bun);
@@ -51,29 +48,37 @@ export default async function handler(req, res) {
     const exposXml = await exposRes.text();
 
     const items = [...exposXml.matchAll(/<item>([\s\S]*?)<\/item>/g)].map(m => m[1]);
-    if (!items.length) {
-      throw new Error("전유부(호별) 데이터가 없습니다.");
-    }
+    if (!items.length) throw new Error("전유부(호별) 데이터가 없습니다.");
 
-    /* 3) 층/호 매칭 */
     const wantHo = hoInput ? (hoInput.endsWith("호") ? hoInput : `${hoInput}호`) : null;
 
     const target = items.find(it => {
-      const flrNo = it.match(/<flrNo>(.*?)<\/flrNo>/)?.[1];
-      const hoNm = it.match(/<hoNm>(.*?)<\/hoNm>/)?.[1];
-      if (String(flrNo) !== floor) return false;
+      const flrNo = getTag(it, "flrNo");
+      const hoNm = getTag(it, "hoNm");
+      if (String(flrNo) !== String(floor)) return false;
       if (wantHo && hoNm !== wantHo) return false;
       return true;
     });
 
-    if (!target) {
-      throw new Error("해당 층/호를 찾지 못했습니다.");
+    if (!target) throw new Error("해당 층/호를 찾지 못했습니다.");
+
+    // 3) 면적 자동 탐지 (핵심 수정)
+    const areaM2 = getAreaM2(target);
+    if (!areaM2) {
+      // 디버그: 어떤 태그들이 있나 힌트 제공
+      const sampleTags = ["excluUseAr", "area", "totArea", "totAr", "flrArea", "etcArea", "archArea"];
+      return res.status(500).json({
+        ok: false,
+        message: "면적 필드를 찾지 못했습니다. (응답 필드명이 area가 아닐 수 있음)",
+        foundTags: sampleTags.reduce((acc, t) => {
+          const v = getTag(target, t);
+          if (v) acc[t] = v;
+          return acc;
+        }, {}),
+      });
     }
 
-    const area = Number(target.match(/<area>([\d.]+)<\/area>/)?.[1]);
-    if (!area) throw new Error("면적(area) 정보가 없습니다.");
-
-    const pyeong = area / 3.305785;
+    const areaPyeong = areaM2 / 3.305785;
 
     return res.status(200).json({
       ok: true,
@@ -81,12 +86,29 @@ export default async function handler(req, res) {
       jibun: j.jibunAddr,
       floor,
       ho: hoInput || null,
-      area_m2: area,
-      area_pyeong: Number(pyeong.toFixed(2)),
+      area_m2: areaM2,
+      area_pyeong: Number(areaPyeong.toFixed(2)),
       source: "건축HUB 전유부(getBrExposInfo)",
     });
 
   } catch (e) {
     return res.status(500).json({ ok: false, message: e.message });
   }
+}
+
+function getTag(xmlChunk, tag) {
+  const m = xmlChunk.match(new RegExp(`<${tag}>([\\s\\S]*?)<\\/${tag}>`));
+  return m?.[1]?.trim() || "";
+}
+
+// 전유면적 필드 자동 탐지
+function getAreaM2(itemXml) {
+  // 가장 유력한 전유면적 필드
+  const candidates = ["excluUseAr", "area", "totArea", "totAr", "flrArea"];
+  for (const t of candidates) {
+    const v = getTag(itemXml, t);
+    const n = Number(v);
+    if (Number.isFinite(n) && n > 0) return n;
+  }
+  return 0;
 }

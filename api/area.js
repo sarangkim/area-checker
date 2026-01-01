@@ -1,10 +1,15 @@
 // api/area.js
 // Vercel Serverless Function (Node 18+)
 // env: JUSO_KEY, BLD_KEY
+//
+// 기능 요약
+// - address만: 도로명/지번/키 + 층 목록(floor_nos) 제공
+// - address+floor: 해당 층 floor_items + 해당 층 ho_list + ho_index(전유유무 등) + (있으면) floor_exclusive 제공
+// - address+floor+ho: 해당 호의 전유/공용 breakdown 제공(스마트국토정보 앱 스타일)
+// - debug=1: 해당 층에서 API별 hoNm 샘플 확인
 
-const BUILD = "2025-12-29-HO-FIX-01";
+const BUILD = "2025-12-30-HO-DETAIL-01";
 
-/* ----------------- main handler ----------------- */
 module.exports = async (req, res) => {
   // ---- CORS ----
   res.setHeader("Access-Control-Allow-Origin", "*");
@@ -16,6 +21,7 @@ module.exports = async (req, res) => {
     const address = String(req.query.address || "").trim();
     const floorRaw = req.query.floor != null ? String(req.query.floor).trim() : "";
     const hoInput = req.query.ho != null ? String(req.query.ho).trim() : "";
+    const debug = String(req.query.debug || "").trim() === "1";
 
     if (!address) {
       return res.status(400).json({ ok: false, build: BUILD, message: "address 파라미터가 필요합니다." });
@@ -38,18 +44,29 @@ module.exports = async (req, res) => {
     const keys = { sigunguCd, bjdongCd, bun, ji };
 
     // 2) 층별현황 (getBrFlrOulnInfo)
-    const flrItems = await fetchBldItems("getBrFlrOulnInfo", {
-      sigunguCd, bjdongCd, bun, ji,
-    });
+    const flrItems = await fetchBldItems("getBrFlrOulnInfo", keys);
+    const floorList = buildFloorList(flrItems);     // [{gb,no}]
+    const floorNos = floorList.map(x => String(x.no)); // ✅ 프론트에서 버튼 만들기 쉬운 순수 숫자 배열
 
-    // 실제 존재 층 목록 구성
-    const floorList = buildFloorList(flrItems);
-
-    // 사용자가 "10층" 같이 넣어도 숫자만 뽑아 처리
     const floorNorm = normalizeFloor(floorRaw);
     const effectiveFloor =
       floorNorm ||
       (floorList.find(f => f.gb === "지상")?.no ?? floorList[0]?.no ?? "");
+
+    // address만 들어온 경우(요약만)
+    if (!floorRaw && !hoInput) {
+      return res.status(200).json({
+        ok: true,
+        build: BUILD,
+        mode: "summary",
+        input: { address, floor: null, ho: null },
+        road: j.roadAddr || "",
+        jibun: j.jibunAddr || "",
+        keys,
+        floors: floorList,     // 필요하면 쓰세요(객체)
+        floor_nos: floorNos,   // ✅ 프론트는 이걸 쓰면 [object Object] 문제 없음
+      });
+    }
 
     if (!effectiveFloor) {
       return res.status(404).json({
@@ -61,125 +78,174 @@ module.exports = async (req, res) => {
       });
     }
 
-    // 해당 층 item들 + pick(대표)
+    // 해당 층 item들
     const floorItems = flrItems.filter(it => String(it.flrNo || "") === String(effectiveFloor));
     const pick = pickBestFloorItem(floorItems);
 
-    // 3) (층만 조회) 호 목록 + (있으면) 층 전유 면적까지 같이 내려줌
-    if (!hoInput) {
-      // 3-A) 호 목록(해당 층만!) 수집
-      const { hoList, hoNote } = await collectHoListForFloor(keys, effectiveFloor);
+    // debug=1이면: API별로 해당 층의 hoNm이 어떤 형태로 오는지 빠르게 확인
+    if (debug) {
+      const dbg = await debugHoSources(keys, effectiveFloor);
+      return res.status(200).json({
+        ok: true,
+        build: BUILD,
+        mode: "debug",
+        input: { address, floor: effectiveFloor, ho: hoInput },
+        road: j.roadAddr || "",
+        jibun: j.jibunAddr || "",
+        keys,
+        floor: String(effectiveFloor),
+        debug: dbg,
+      });
+    }
 
-      // 3-B) 스마트국토정보 앱처럼 "층 전유"가 API에 있는 경우가 있음(hoNm이 비어있음)
-      // getBrExposPubuseAreaInfo에서 flrNo=층, gb=전유(1), hoNm이 비거나 0/NULL인 케이스
+    // 3) (층만 조회) => floor_items + 해당 층 ho_list + ho_index + (있으면) floor_exclusive
+    if (!hoInput) {
+      const { hoList, hoNote, hoIndex } = await collectHoListForFloor(keys, effectiveFloor);
       const floorExclusive = await findFloorExclusiveArea(keys, effectiveFloor);
 
       return res.status(200).json({
         ok: true,
         build: BUILD,
-        mode: "floorItems+hoList+floorExclusive",
+        mode: "floor",
         input: { address, floor: effectiveFloor, ho: null },
-        jibun: j.jibunAddr,
-        road: j.roadAddr,
+        road: j.roadAddr || "",
+        jibun: j.jibunAddr || "",
         keys,
+        floor_nos: floorNos,
 
-        floors: floorList, // 버튼 만들 때 쓰기 좋게 전체 층 제공(원하면 프론트에서 사용)
         floor_items: floorItems.map(toClientFloorItem),
         pick: pick ? toClientFloorItem(pick) : null,
 
-        // ✅ 드롭다운은 이 ho_list만 쓰면 됨(해당 층만 들어있음)
+        // ✅ 이 ho_list는 "해당 층만" 들어있게 강제
         ho_list: hoList,
         ho_list_note: hoNote,
+        ho_index: hoIndex, // { "1306": { hasExclusive, exclusive_m2, shared_m2, ... } }
 
-        // ✅ (있으면) 층 전유면적(앱에서 보이는 전유)
         floor_exclusive_m2: floorExclusive?.m2 ?? null,
         floor_exclusive_pyeong: floorExclusive?.m2 ? round2(floorExclusive.m2 / 3.305785) : null,
         floor_exclusive_note: floorExclusive?.note ?? null,
       });
     }
 
-    // 4) (호 조회) 전유부 우선: getBrExposInfo → 없으면 getBrExposPubuseAreaInfo
+    // 4) (호 조회) => 스마트국토정보 앱처럼 전유/공용 현황 breakdown
     const wantHoNorm = normalizeHo(hoInput);
 
-    // 4-A) 전유부(getBrExposInfo)에서 먼저 찾기
-    const exposItems = await fetchBldItems("getBrExposInfo", keys);
-    let target = exposItems.find(it =>
-      String(it.flrNo || "") === String(effectiveFloor) &&
-      normalizeHo(it.hoNm || "") === wantHoNorm
-    );
-
-    let areaM2 = target ? toNumber(target.area) : 0;
-    if (areaM2 > 0) {
-      return res.status(200).json({
-        ok: true,
-        build: BUILD,
-        mode: "exposInfo(전유부) ho-match",
-        input: { address, floor: effectiveFloor, ho: hoInput },
-        jibun: j.jibunAddr,
-        road: j.roadAddr,
-        keys,
-        ho_matched: { hoNm: target.hoNm, flrNo: target.flrNo, dongNm: target.dongNm || "" },
-        area_m2: areaM2,
-        area_pyeong: round2(areaM2 / 3.305785),
-        note: "전유부(getBrExposInfo)의 area 사용",
-      });
-    }
-
-    // 4-B) 전유/공용(getBrExposPubuseAreaInfo)에서 찾기(전유 우선, 없으면 max(area))
+    // 4-A) 전유/공용(getBrExposPubuseAreaInfo)에서 해당 호 레코드 전부 긁어서 전유/공용 표로 반환
     const pubItems = await fetchBldItems("getBrExposPubuseAreaInfo", keys);
 
-    const matches = pubItems.filter(it =>
+    // 1차: 정규화 동일 매칭
+    let hoRows = pubItems.filter(it =>
       String(it.flrNo || "") === String(effectiveFloor) &&
       normalizeHo(it.hoNm || "") === wantHoNorm
     );
 
-    let best = matches.find(it =>
-      String(it.exposPubuseGbCd || "") === "1" ||
-      String(it.exposPubuseGbCdNm || "").includes("전유")
-    );
-    if (!best && matches.length) {
-      best = matches.slice().sort((a, b) => (toNumber(b.area) || 0) - (toNumber(a.area) || 0))[0];
-    }
-
-    areaM2 = best ? toNumber(best.area) : 0;
-    if (areaM2 > 0) {
-      const gb = best.exposPubuseGbCdNm || best.exposPubuseGbCd || "";
-      return res.status(200).json({
-        ok: true,
-        build: BUILD,
-        mode: "exposPubuseArea ho-match",
-        input: { address, floor: effectiveFloor, ho: hoInput },
-        jibun: j.jibunAddr,
-        road: j.roadAddr,
-        keys,
-        ho_matched: { hoNm: best.hoNm, flrNo: best.flrNo, dongNm: best.dongNm || "" },
-        area_m2: areaM2,
-        area_pyeong: round2(areaM2 / 3.305785),
-        note: `getBrExposPubuseAreaInfo 사용 (구분=${gb || "미상"})`,
-        debug: {
-          matched_count: matches.length,
-          used_rule:
-            (String(best.exposPubuseGbCd || "") === "1" || String(best.exposPubuseGbCdNm || "").includes("전유"))
-              ? "전유 우선"
-              : "전유 없음 → max(area) fallback",
-        },
+    // 2차: 포함 매칭(예: "1306-1308" 같이 들어오는 케이스 대비)
+    if (!hoRows.length) {
+      hoRows = pubItems.filter(it => {
+        if (String(it.flrNo || "") !== String(effectiveFloor)) return false;
+        const raw = String(it.hoNm || "").trim();
+        if (!raw) return false;
+        // 숫자 경계 포함 여부(1306이 21306에 매칭되는 것 방지)
+        return new RegExp(`(^|[^0-9])${escapeReg(wantHoNorm)}([^0-9]|$)`).test(raw);
       });
     }
 
-    // 4-C) 그래도 못 찾으면: (앱에선 보이는데 ho가 없는 케이스) "층 전유"로 안내
+    // 전유/공용 합계 및 표 행
+    if (hoRows.length) {
+      const breakdown = hoRows.map(x => ({
+        gb: x.exposPubuseGbCdNm || codeToGb(x.exposPubuseGbCd),
+        flrNm: x.flrNoNm || (x.flrNo ? `지상${x.flrNo}층` : ""),
+        structure: x.strctCdNm || x.strctCd || "",   // (있으면)
+        use: x.mainPurpsCdNm || x.etcPurps || "",
+        area_m2: toNumber(x.area),
+        area_pyeong: round2(toNumber(x.area) / 3.305785),
+        raw: { flrNo: x.flrNo || "", hoNm: x.hoNm || "" },
+      }));
+
+      const sum = (pred) =>
+        round2(hoRows.filter(pred).reduce((acc, it) => acc + toNumber(it.area), 0));
+
+      const exclusiveM2 = sum(it =>
+        String(it.exposPubuseGbCd || "") === "1" || String(it.exposPubuseGbCdNm || "").includes("전유")
+      );
+      const sharedM2 = sum(it =>
+        String(it.exposPubuseGbCd || "") === "2" || String(it.exposPubuseGbCdNm || "").includes("공용")
+      );
+      const totalM2 = round2(exclusiveM2 + sharedM2);
+
+      return res.status(200).json({
+        ok: true,
+        build: BUILD,
+        mode: "ho_breakdown",
+        input: { address, floor: effectiveFloor, ho: hoInput },
+        road: j.roadAddr || "",
+        jibun: j.jibunAddr || "",
+        keys,
+        ho_matched: { want: hoInput, wantHoNorm },
+        breakdown,
+        sum: {
+          exclusive_m2: exclusiveM2 || null,
+          exclusive_pyeong: exclusiveM2 ? round2(exclusiveM2 / 3.305785) : null,
+          shared_m2: sharedM2 || null,
+          shared_pyeong: sharedM2 ? round2(sharedM2 / 3.305785) : null,
+          total_m2: totalM2 || null,
+          total_pyeong: totalM2 ? round2(totalM2 / 3.305785) : null,
+        },
+        note: "getBrExposPubuseAreaInfo 기준으로 호별 전유/공용을 구성했습니다.",
+      });
+    }
+
+    // 4-B) 전유부(getBrExposInfo) fallback (pubuse에 호가 없을 때)
+    const exposItems = await fetchBldItems("getBrExposInfo", keys);
+    const target = exposItems.find(it =>
+      String(it.flrNo || "") === String(effectiveFloor) &&
+      normalizeHo(it.hoNm || "") === wantHoNorm
+    );
+    const areaM2 = target ? toNumber(target.area) : 0;
+    if (areaM2 > 0) {
+      return res.status(200).json({
+        ok: true,
+        build: BUILD,
+        mode: "exposInfo_fallback",
+        input: { address, floor: effectiveFloor, ho: hoInput },
+        road: j.roadAddr || "",
+        jibun: j.jibunAddr || "",
+        keys,
+        ho_matched: { hoNm: target.hoNm, flrNo: target.flrNo, dongNm: target.dongNm || "" },
+        sum: {
+          exclusive_m2: areaM2,
+          exclusive_pyeong: round2(areaM2 / 3.305785),
+          shared_m2: null,
+          shared_pyeong: null,
+          total_m2: areaM2,
+          total_pyeong: round2(areaM2 / 3.305785),
+        },
+        note: "전유/공용 breakdown 데이터가 없어서 전유부(getBrExposInfo) 면적으로 안내합니다.",
+      });
+    }
+
+    // 4-C) 그래도 없으면 "층 전유(hoNm 없음)" 안내
     const floorExclusive = await findFloorExclusiveArea(keys, effectiveFloor);
     if (floorExclusive?.m2) {
       return res.status(200).json({
         ok: true,
         build: BUILD,
-        mode: "floorExclusive fallback",
+        mode: "floorExclusive_fallback",
         input: { address, floor: effectiveFloor, ho: hoInput },
-        jibun: j.jibunAddr,
-        road: j.roadAddr,
+        road: j.roadAddr || "",
+        jibun: j.jibunAddr || "",
         keys,
-        area_m2: floorExclusive.m2,
-        area_pyeong: round2(floorExclusive.m2 / 3.305785),
-        note: "해당 호 전유가 공공API에 없어서, 같은 층의 '전유(hoNm 비어있는)' 면적으로 안내합니다.",
+        sum: {
+          exclusive_m2: floorExclusive.m2,
+          exclusive_pyeong: round2(floorExclusive.m2 / 3.305785),
+          shared_m2: null,
+          shared_pyeong: null,
+          total_m2: floorExclusive.m2,
+          total_pyeong: round2(floorExclusive.m2 / 3.305785),
+        },
+        note:
+          "해당 호 데이터가 공공API에서 누락되어, 같은 층의 '전유(hoNm 비어있는)' 면적으로 안내합니다. " +
+          "이 경우 스마트국토정보 앱도 '호'가 실질적으로 층 전유 단위로만 제공되는 케이스일 수 있습니다.",
         floor_exclusive_note: floorExclusive.note,
       });
     }
@@ -191,12 +257,10 @@ module.exports = async (req, res) => {
       message: "해당 층/호 면적 데이터를 공공API에서 찾지 못했습니다.",
       input: { address, floor: effectiveFloor, ho: hoInput },
       wantHoNorm,
-      hint: "이 건물은 호 전유가 API에 없거나, 호 표기가 다를 수 있습니다(예: 1209호/1209-1). 또는 앱은 '층 전유(ho 없음)'만 제공하는 케이스일 수 있습니다.",
-      pubuse_samples: matches.slice(0, 50).map(x => ({
-        flrNo: x.flrNo, hoNm: x.hoNm, gb: x.exposPubuseGbCdNm, area: x.area
-      })),
+      hint:
+        "이 건물은 (1) 호 전유/공용이 API에 없거나, (2) 호 표기가 다르거나(예: 1306-1308, 1306-1), " +
+        "(3) 앱은 내부/비공개 소스(또는 다른 엔드포인트)로 보완했을 수 있습니다. debug=1로 hoNm 형태를 점검해보세요.",
     });
-
   } catch (e) {
     return res.status(500).json({ ok: false, build: BUILD, message: e.message });
   }
@@ -243,13 +307,14 @@ function getTag(xmlChunk, tag) {
 }
 
 function itemXmlToObj(item) {
+  // API마다 태그가 조금씩 다를 수 있어 넉넉하게
   const tags = [
     "flrNo", "flrNoNm", "flrGbCdNm",
     "hoNm", "dongNm",
     "exposPubuseGbCd", "exposPubuseGbCdNm",
     "mainPurpsCdNm", "etcPurps",
+    "strctCdNm", "strctCd",
     "area",
-    "mgmBldrgstPk"
   ];
   const o = {};
   for (const t of tags) o[t] = getTag(item, t);
@@ -277,19 +342,17 @@ function round2(n) {
 }
 
 function normalizeHo(s) {
-  // "1209호", "1209", "1209-1" => "1209" (첫 숫자만)
+  // "1209호", "1209", "1209-1", "1209~1210" => "1209" (첫 숫자만)
   const m = String(s || "").match(/\d+/);
   return m ? m[0] : "";
 }
 
 function normalizeFloor(s) {
-  // "10", "10층", "지상10" 등 -> "10"
   const m = String(s || "").match(/-?\d+/);
   return m ? String(Number(m[0])) : "";
 }
 
 function buildFloorList(flrItems) {
-  // flrGbCdNm이 '지상'/'지하'로 오는 경우가 많음
   const map = new Map(); // key: `${gb}:${no}`
   for (const it of flrItems || []) {
     const no = normalizeFloor(it.flrNo || "");
@@ -298,10 +361,8 @@ function buildFloorList(flrItems) {
     const key = `${gb}:${no}`;
     if (!map.has(key)) map.set(key, { gb, no: String(no) });
   }
-
   const arr = [...map.values()];
   arr.sort((a, b) => {
-    // 지하 먼저(원하면 바꿔도 됨)
     if (a.gb !== b.gb) return a.gb === "지하" ? -1 : 1;
     return Number(a.no) - Number(b.no);
   });
@@ -310,66 +371,132 @@ function buildFloorList(flrItems) {
 
 function pickBestFloorItem(items) {
   if (!items || !items.length) return null;
-
-  // 공용 시설은 감점, 업무/사무 느낌은 가점, 기본은 area 큰 것 우선
   const score = (it) => {
     const area = toNumber(it.area);
     const txt = `${it.mainPurpsCdNm || ""} ${it.etcPurps || ""}`.trim();
     let s = area;
-
     if (txt.includes("공용")) s -= 100000;
     if (txt.includes("업무") || txt.includes("사무")) s += 50000;
-
     return s;
   };
-
   return items.slice().sort((a, b) => score(b) - score(a))[0];
 }
 
+// ✅ 프론트 표(구분/용도/세부)에 바로 들어가게 필드명 맞춤
 function toClientFloorItem(it) {
   const areaM2 = toNumber(it.area);
   return {
+    gb: it.flrGbCdNm || "-",                  // 구분
+    use: it.mainPurpsCdNm || "-",             // 용도
+    detail: it.etcPurps || "-",               // 세부
     flrNo: it.flrNo || "",
     flrNoNm: it.flrNoNm || "",
-    flrGbCdNm: it.flrGbCdNm || "",
-    mainPurpsCdNm: it.mainPurpsCdNm || "",
-    etcPurps: it.etcPurps || "",
     area_m2: areaM2,
     area_pyeong: round2(areaM2 / 3.305785),
   };
 }
 
+function codeToGb(code) {
+  const c = String(code || "");
+  if (c === "1") return "전유";
+  if (c === "2") return "공용";
+  return c || "";
+}
+
+function escapeReg(s) {
+  return String(s || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
 async function collectHoListForFloor(keys, floor) {
-  const hoSet = new Set();
+  const hoSet = new Set();     // 원본 hoNm
+  const hoIndex = {};          // normalizeHo 기준 인덱스
   let hoNote = "";
 
-  // (A) getBrExposInfo에서 호 수집
+  // helper: add ho
+  const addHo = (hoNm, src) => {
+    const raw = String(hoNm || "").trim();
+    if (!raw) return;
+    hoSet.add(raw);
+
+    const norm = normalizeHo(raw);
+    if (!norm) return;
+
+    if (!hoIndex[norm]) {
+      hoIndex[norm] = {
+        norm,
+        samples: [],
+        hasExclusive: false,
+        exclusive_m2: 0,
+        shared_m2: 0,
+        sources: new Set(),
+      };
+    }
+    const idx = hoIndex[norm];
+    idx.sources.add(src);
+    if (idx.samples.length < 5 && !idx.samples.includes(raw)) idx.samples.push(raw);
+  };
+
+  // (A) getBrExposInfo
   try {
     const exposItems = await fetchBldItems("getBrExposInfo", keys);
     exposItems
       .filter(it => String(it.flrNo || "") === String(floor))
-      .map(it => (it.hoNm || "").trim())
-      .filter(Boolean)
-      .forEach(h => hoSet.add(h));
+      .forEach(it => addHo(it.hoNm, "exposInfo"));
   } catch (e) {
-    hoNote += `exposInfo 호수집 실패: ${e.message} `;
+    hoNote += `exposInfo 실패: ${e.message} `;
   }
 
-  // (B) getBrExposPubuseAreaInfo에서도 호 수집(누락 보완)
+  // (B) getBrExposPubuseAreaInfo (전유/공용) — 여기서 전유/공용 여부도 hoIndex에 채움
   try {
     const pubItems = await fetchBldItems("getBrExposPubuseAreaInfo", keys);
     pubItems
       .filter(it => String(it.flrNo || "") === String(floor))
-      .map(it => (it.hoNm || "").trim())
-      .filter(Boolean)
-      .forEach(h => hoSet.add(h));
+      .forEach(it => {
+        addHo(it.hoNm, "pubuseArea");
+        const norm = normalizeHo(it.hoNm || "");
+        if (!norm || !hoIndex[norm]) return;
+
+        const isExclusive =
+          String(it.exposPubuseGbCd || "") === "1" ||
+          String(it.exposPubuseGbCdNm || "").includes("전유");
+        const isShared =
+          String(it.exposPubuseGbCd || "") === "2" ||
+          String(it.exposPubuseGbCdNm || "").includes("공용");
+
+        const a = toNumber(it.area);
+        if (isExclusive) {
+          hoIndex[norm].hasExclusive = true;
+          hoIndex[norm].exclusive_m2 += a;
+        } else if (isShared) {
+          hoIndex[norm].shared_m2 += a;
+        }
+      });
+
+    // 합계 round
+    Object.values(hoIndex).forEach(v => {
+      v.exclusive_m2 = round2(v.exclusive_m2);
+      v.shared_m2 = round2(v.shared_m2);
+      v.total_m2 = round2(v.exclusive_m2 + v.shared_m2);
+      v.exclusive_pyeong = v.exclusive_m2 ? round2(v.exclusive_m2 / 3.305785) : null;
+      v.shared_pyeong = v.shared_m2 ? round2(v.shared_m2 / 3.305785) : null;
+      v.total_pyeong = v.total_m2 ? round2(v.total_m2 / 3.305785) : null;
+      v.sources = [...v.sources];
+    });
   } catch (e) {
-    hoNote += `pubuseArea 호수집 실패: ${e.message} `;
+    hoNote += `pubuseArea 실패: ${e.message} `;
   }
 
-  // ✅ 여기서 “다른 층”이 섞이는 문제는 반드시 이 floor 필터가 깨졌을 때 생깁니다.
-  // 위에서 floor 필터로만 set에 넣기 때문에, ho_list는 해당 층만 나옵니다.
+  // (C) 선택사항: getBrTitleInfo — 존재하지 않는 API일 수 있어 실패해도 OK
+  try {
+    const titleItems = await fetchBldItems("getBrTitleInfo", keys);
+    titleItems
+      .filter(it => String(it.flrNo || "") === String(floor))
+      .forEach(it => addHo(it.hoNm, "titleInfo"));
+  } catch (e) {
+    // 조용히 무시(환경마다 API가 막혀 있거나 미지원일 수 있음)
+  }
 
+  // ✅ hoList는 “정규화 숫자 기준”으로 정렬해서 프론트 드롭다운이 깔끔해짐
   const hoList = [...hoSet].sort((a, b) => {
     const na = Number(normalizeHo(a)) || 0;
     const nb = Number(normalizeHo(b)) || 0;
@@ -377,17 +504,16 @@ async function collectHoListForFloor(keys, floor) {
     return String(a).localeCompare(String(b), "ko");
   });
 
-  if (!hoList.length) {
-    hoNote = (hoNote || "") + "해당 층에서 호 목록을 찾지 못했습니다.";
-  }
-  return { hoList, hoNote: hoNote.trim() };
+  if (!hoList.length) hoNote = (hoNote || "") + "해당 층에서 호 목록을 찾지 못했습니다.";
+
+  return { hoList, hoNote: hoNote.trim(), hoIndex };
 }
 
 async function findFloorExclusiveArea(keys, floor) {
   // getBrExposPubuseAreaInfo에서:
   // - flrNo=층
   // - 전유(1)
-  // - hoNm이 비어있거나 숫자가 없는 케이스(층 전유)
+  // - hoNm이 비어있거나 숫자가 안 잡히는 케이스(층 전유)
   try {
     const pubItems = await fetchBldItems("getBrExposPubuseAreaInfo", keys);
     const candidates = pubItems.filter(it => {
@@ -396,28 +522,43 @@ async function findFloorExclusiveArea(keys, floor) {
       const isExclusive =
         String(it.exposPubuseGbCd || "") === "1" ||
         String(it.exposPubuseGbCdNm || "").includes("전유");
-
       if (!isExclusive) return false;
 
-      // hoNm이 없거나(빈문자/공백) 숫자가 안 잡히면 '층 전유' 후보로 간주
       const hoNorm = normalizeHo(it.hoNm || "");
       const hoRaw = String(it.hoNm || "").trim();
       return !hoRaw || !hoNorm;
     });
 
     if (!candidates.length) return null;
-
-    // 면적 큰 값 우선
     candidates.sort((a, b) => (toNumber(b.area) || 0) - (toNumber(a.area) || 0));
     const best = candidates[0];
     const m2 = toNumber(best.area);
-
     if (!m2) return null;
+
     return {
       m2,
       note: `getBrExposPubuseAreaInfo: flrNo=${best.flrNo}, gb=${best.exposPubuseGbCdNm || best.exposPubuseGbCd}, hoNm="${best.hoNm || ""}"`,
     };
-  } catch (e) {
+  } catch {
     return null;
   }
+}
+
+async function debugHoSources(keys, floor) {
+  const out = {};
+  const apis = ["getBrExposInfo", "getBrExposPubuseAreaInfo", "getBrTitleInfo"];
+  for (const api of apis) {
+    try {
+      const items = await fetchBldItems(api, keys);
+      const floorItems = items.filter(it => String(it.flrNo || "") === String(floor));
+      out[api] = {
+        total: items.length,
+        floorCount: floorItems.length,
+        hoNmSamples: floorItems.map(it => it.hoNm).filter(Boolean).slice(0, 80),
+      };
+    } catch (e) {
+      out[api] = { error: e.message };
+    }
+  }
+  return out;
 }

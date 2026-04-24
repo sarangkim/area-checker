@@ -8,11 +8,14 @@
 * { box-sizing: border-box; margin: 0; padding: 0; }
 html, body {
   font-family: 'Noto Sans KR', sans-serif;
-  background: transparent;
+  background: #f8fafc;
   padding: 0; margin: 0;
   overflow-x: hidden;
+  /* iframe 높이 자동조절: body가 콘텐츠 높이에 맞게 늘어남 */
+  height: auto;
+  min-height: 100%;
 }
-#areaApp { width: 100%; padding: 12px; }
+#areaApp { width: 100%; padding: 12px; max-width: 860px; margin: 0 auto; }
 .ac-card {
   background: #fff;
   border: 1px solid #e0e0e0;
@@ -231,29 +234,23 @@ html, body {
   var _allData = null, _selectedFloor = null;
   var _kakaoMap = null, _kakaoMarker = null, _kakaoReady = false;
 
-  /* ── iframe 높이 자동 전송 ── */
+  /* ── iframe 높이: parent에 postMessage 전송 ── */
   function sendHeight() {
     var app = document.getElementById('areaApp');
     if (!app) return;
-    var h = app.scrollHeight + 24;
+    var h = Math.max(app.scrollHeight, app.offsetHeight) + 40;
     try { window.parent.postMessage({ type: 'calcHeight', height: h }, '*'); } catch(e){}
+    // document.body 높이도 직접 설정 (일부 브라우저 대응)
+    try { document.body.style.minHeight = h + 'px'; } catch(e){}
   }
   // DOM 변경될 때마다 높이 전송
   if (window.MutationObserver) {
-    new MutationObserver(function() { sendHeight(); }).observe(
-      document.getElementById('areaApp') || document.body,
-      { childList: true, subtree: true, attributes: true, characterData: true }
-    );
+    new MutationObserver(function() {
+      setTimeout(sendHeight, 50);
+    }).observe(document.body, { childList: true, subtree: true });
   }
-  // 주기적 폴백 (100ms마다 체크, 10초 후 중단)
-  var _lastH = 0, _pollCount = 0;
-  var _poll = setInterval(function() {
-    var app = document.getElementById('areaApp');
-    if (!app) return;
-    var h = app.scrollHeight + 24;
-    if (h !== _lastH) { _lastH = h; sendHeight(); }
-    if (++_pollCount > 100) clearInterval(_poll);
-  }, 100);
+  // 500ms마다 체크 (지속적으로)
+  setInterval(sendHeight, 500);
   window.addEventListener('load', sendHeight);
   window.addEventListener('resize', sendHeight);
 

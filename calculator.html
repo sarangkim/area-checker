@@ -2,16 +2,18 @@
 <html lang="ko">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
 <title>평수 계산기</title>
 <style>
 * { box-sizing: border-box; margin: 0; padding: 0; }
-body {
+html, body {
   font-family: 'Noto Sans KR', sans-serif;
-  background: #f8fafc;
-  padding: 16px;
+  background: transparent;
+  padding: 0;
+  margin: 0;
+  overflow-x: hidden;
 }
-#areaApp { width: 100%; max-width: 800px; margin: 0 auto; }
+#areaApp { width: 100%; max-width: 100%; }
 .ac-card {
   background: #fff;
   border: 1px solid #e0e0e0;
@@ -107,11 +109,16 @@ body {
 .ac-result-label { color: #555; }
 .ac-result-val   { font-weight: 600; color: #1e3a8a; }
 @media (max-width: 480px) {
-  body { padding: 8px; }
-  .ac-card { padding: 14px; }
-  .ac-title { font-size: 1.1rem; }
-  .ac-btn { padding: 10px 14px; font-size: .9rem; }
-  #kakaoMap { height: 260px !important; }
+  .ac-card { padding: 12px; }
+  .ac-title { font-size: 1.05rem; }
+  .ac-sub { font-size: .85rem; }
+  .ac-btn { padding: 10px 12px; font-size: .88rem; }
+  .ac-input { font-size: .88rem; padding: 9px 10px; }
+  .ac-table { font-size: .8rem; }
+  .ac-table th, .ac-table td { padding: 6px 6px; }
+  #kakaoMap { height: 240px !important; }
+  .ac-map-type-btn { padding: 4px 8px; font-size: .75rem; }
+  .ac-floor-btn { padding: 6px 10px; font-size: .82rem; }
 }
 </style>
 </head>
@@ -218,6 +225,25 @@ body {
   </div>
 
 </div><!-- /#areaApp -->
+
+<script>
+/* ── iframe 높이 자동 전송 ── */
+(function() {
+  function sendHeight() {
+    var h = document.getElementById('areaApp');
+    if (!h) return;
+    var height = h.scrollHeight + 32;
+    window.parent.postMessage({ type: 'calcHeight', height: height }, '*');
+  }
+  // MutationObserver로 DOM 변경 감지
+  var mo = new MutationObserver(function() { sendHeight(); });
+  mo.observe(document.getElementById('areaApp') || document.body, {
+    childList: true, subtree: true, attributes: true
+  });
+  window.addEventListener('load', sendHeight);
+  window.addEventListener('resize', sendHeight);
+})();
+</script>
 
 <script>
 (function () {

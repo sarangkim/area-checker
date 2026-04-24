@@ -1,0 +1,529 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>평수 계산기</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+  font-family: 'Noto Sans KR', sans-serif;
+  background: #f8fafc;
+  padding: 16px;
+}
+#areaApp { width: 100%; max-width: 800px; margin: 0 auto; }
+.ac-card {
+  background: #fff;
+  border: 1px solid #e0e0e0;
+  border-radius: 12px;
+  padding: 20px;
+  margin-bottom: 14px;
+  box-shadow: 0 1px 4px rgba(0,0,0,.06);
+  width: 100%;
+}
+.ac-title  { font-size: 1.25rem; font-weight: 700; margin: 0 0 6px; }
+.ac-sub    { font-size: .92rem; color: #555; margin: 0 0 14px; }
+.ac-label  { font-size: .78rem; color: #888; font-weight: 600; text-transform: uppercase; letter-spacing: .04em; }
+.ac-value  { font-size: .95rem; color: #222; margin-top: 2px; }
+.ac-row    { display: flex; gap: 8px; align-items: center; }
+.ac-input  {
+  flex: 1; padding: 10px 12px;
+  border: 1px solid #ccc; border-radius: 8px;
+  font-size: .95rem; outline: none;
+}
+.ac-input:focus { border-color: #2563eb; }
+.ac-btn {
+  padding: 10px 20px;
+  background: #2563eb; color: #fff;
+  border: none; border-radius: 8px;
+  font-size: .95rem; cursor: pointer;
+  white-space: nowrap; font-weight: 600;
+}
+.ac-btn:hover    { background: #1d4ed8; }
+.ac-btn:disabled { background: #93c5fd; cursor: not-allowed; }
+.ac-err {
+  background: #fef2f2; color: #b91c1c;
+  border: 1px solid #fecaca;
+  border-radius: 8px; padding: 10px 14px;
+  font-size: .9rem; margin-top: 10px;
+}
+.ac-tips {
+  font-size: .82rem; color: #777;
+  margin: 14px 0 0; padding-left: 18px; line-height: 1.8;
+}
+.ac-loading {
+  background: #eff6ff; color: #1d4ed8;
+  border: 1px solid #bfdbfe;
+  border-radius: 8px; padding: 10px 14px;
+  font-size: .9rem; margin-top: 14px; text-align: center;
+}
+.ac-map-controls {
+  display: flex; align-items: center;
+  justify-content: space-between; flex-wrap: wrap; gap: 6px;
+  padding: 10px 14px;
+  background: #f8fafc;
+  border-bottom: 1px solid #e2e8f0;
+  border-radius: 12px 12px 0 0;
+}
+.ac-map-addr {
+  font-size: .85rem; color: #334155; font-weight: 500;
+  flex: 1; min-width: 0;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.ac-map-btns { display: flex; gap: 6px; flex-wrap: wrap; }
+.ac-map-type-btn {
+  padding: 5px 12px; border: 1px solid #cbd5e1;
+  border-radius: 20px; background: #fff;
+  font-size: .8rem; cursor: pointer; font-weight: 500;
+}
+.ac-map-type-btn.active { background: #1e3a8a; color: #fff; border-color: #1e3a8a; }
+.ac-map-ext-btn {
+  padding: 5px 12px; border: 1px solid #2563eb;
+  border-radius: 20px; background: #eff6ff;
+  font-size: .8rem; color: #2563eb; text-decoration: none;
+  font-weight: 500; white-space: nowrap;
+}
+.ac-floors     { margin-top: 16px; }
+.ac-floor-wrap { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 4px; }
+.ac-floor-btn  {
+  padding: 7px 14px;
+  border: 1px solid #d1d5db; border-radius: 6px;
+  background: #f9fafb; font-size: .88rem;
+  cursor: pointer; font-weight: 500;
+}
+.ac-floor-btn.active { background: #1e3a8a; color: #fff; border-color: #1e3a8a; }
+.ac-floor-title { font-size: 1.05rem; font-weight: 700; margin-bottom: 10px; color: #1e3a8a; }
+.ac-meta        { font-size: .85rem; color: #555; margin-bottom: 10px; }
+.ac-table { width: 100%; border-collapse: collapse; font-size: .87rem; margin-top: 6px; }
+.ac-table th {
+  background: #f1f5f9; padding: 8px 10px;
+  text-align: left; border-bottom: 2px solid #e2e8f0; font-weight: 600;
+}
+.ac-table td { padding: 7px 10px; border-bottom: 1px solid #f1f5f9; }
+.ac-table tr:last-child td { border-bottom: none; }
+.ac-result-box   { background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 10px; padding: 14px 18px; }
+.ac-result-row   { display: flex; justify-content: space-between; padding: 5px 0; font-size: .95rem; }
+.ac-result-total { border-top: 1px solid #cbd5e1; margin-top: 6px; padding-top: 10px; font-weight: 700; }
+.ac-result-label { color: #555; }
+.ac-result-val   { font-weight: 600; color: #1e3a8a; }
+@media (max-width: 480px) {
+  body { padding: 8px; }
+  .ac-card { padding: 14px; }
+  .ac-title { font-size: 1.1rem; }
+  .ac-btn { padding: 10px 14px; font-size: .9rem; }
+  #kakaoMap { height: 260px !important; }
+}
+</style>
+</head>
+<body>
+<div id="areaApp">
+
+  <!-- 검색 카드 -->
+  <div class="ac-card" id="searchCard">
+    <h2 class="ac-title">평수 계산기</h2>
+    <p class="ac-sub">도로명 주소를 입력하면 건물 층별·호실별 전용면적과 위치 지도를 보여드립니다.</p>
+    <div class="ac-row">
+      <input id="addrInput" class="ac-input" type="text"
+        placeholder="예) 서울 강서구 공항대로 219"
+        autocomplete="off" />
+      <button id="searchBtn" class="ac-btn">조회</button>
+    </div>
+    <div id="errBox" class="ac-err" style="display:none"></div>
+    <ul class="ac-tips">
+      <li>도로명 주소를 입력하세요 (예: 서울 강서구 공항대로 219)</li>
+      <li>아파트·오피스텔·상가 등 모든 건물 조회 가능</li>
+      <li>데이터 출처: 공공데이터포털 건축물대장 API</li>
+    </ul>
+  </div>
+
+  <!-- 지도 카드 -->
+  <div class="ac-card" id="mapCard" style="display:none; padding:0; overflow:hidden;">
+    <div class="ac-map-controls">
+      <span id="mapAddrLabel" class="ac-map-addr"></span>
+      <div class="ac-map-btns">
+        <button class="ac-map-type-btn" id="btnNormal">일반</button>
+        <button class="ac-map-type-btn active" id="btnDistrict">지적편집도</button>
+        <button class="ac-map-type-btn" id="btnSky">위성</button>
+        <a id="kakaoMapLink" href="#" target="_blank" class="ac-map-ext-btn" style="display:none">카카오맵에서 보기 ↗</a>
+      </div>
+    </div>
+    <div id="kakaoMap" style="width:100%; height:380px;"></div>
+    <div id="mapFallback" style="display:none; width:100%; height:220px; background:#f1f5f9; align-items:center; justify-content:center; flex-direction:column; gap:12px;">
+      <div style="font-size:2rem">🗺️</div>
+      <div style="color:#64748b; font-size:.9rem; text-align:center;">
+        <a id="mapFallbackLink" href="#" target="_blank" style="color:#2563eb; text-decoration:underline;">카카오맵에서 보기 ↗</a>
+      </div>
+    </div>
+  </div>
+
+  <!-- 요약 카드 -->
+  <div class="ac-card" id="summaryCard" style="display:none">
+    <div class="ac-label">입력 주소</div>
+    <div id="summaryInput" class="ac-value"></div>
+    <div class="ac-label" style="margin-top:10px">도로명 주소</div>
+    <div id="summaryRoad" class="ac-value"></div>
+    <div class="ac-label" style="margin-top:10px">지번 주소</div>
+    <div id="summaryJibun" class="ac-value"></div>
+    <div id="loadingMsg" class="ac-loading" style="display:none">
+      ⏳ 전체 데이터를 불러오는 중입니다… (건물 규모에 따라 5~20초 소요)
+    </div>
+    <div id="floorBtns" class="ac-floors" style="display:none">
+      <div class="ac-label" style="margin-bottom:6px">층 선택</div>
+      <div id="floorBtnWrap" class="ac-floor-wrap"></div>
+    </div>
+  </div>
+
+  <!-- 층 상세 카드 -->
+  <div class="ac-card" id="floorCard" style="display:none">
+    <div id="floorTitle" class="ac-floor-title"></div>
+    <div id="floorMeta" class="ac-meta"></div>
+    <table class="ac-table">
+      <thead>
+        <tr><th>구분</th><th>용도</th><th>세부용도</th><th>면적(㎡)</th><th>평수</th></tr>
+      </thead>
+      <tbody id="floorTbody"></tbody>
+    </table>
+    <div id="hoSection" style="margin-top:16px">
+      <div class="ac-label">호실 선택</div>
+      <div class="ac-row" style="margin-top:6px;flex-wrap:wrap;gap:6px">
+        <select id="hoSelect" class="ac-input" style="flex:1;min-width:120px"></select>
+        <input id="hoInput" class="ac-input" style="flex:1;min-width:80px"
+          type="text" placeholder="직접 입력 (예: 1201)" />
+        <button id="hoBtn" class="ac-btn">호 조회</button>
+      </div>
+      <div id="hoMessage" class="ac-meta" style="margin-top:6px"></div>
+    </div>
+    <div id="hoResult" style="display:none;margin-top:16px">
+      <div class="ac-result-box">
+        <div class="ac-result-row">
+          <span class="ac-result-label">전용면적</span>
+          <span id="resExclusive" class="ac-result-val"></span>
+        </div>
+        <div class="ac-result-row">
+          <span class="ac-result-label">공용면적</span>
+          <span id="resShared" class="ac-result-val"></span>
+        </div>
+        <div class="ac-result-row ac-result-total">
+          <span class="ac-result-label">합계</span>
+          <span id="resTotal" class="ac-result-val"></span>
+        </div>
+      </div>
+      <table class="ac-table" style="margin-top:10px">
+        <thead>
+          <tr><th>구분</th><th>층</th><th>용도</th><th>면적(㎡)</th><th>평수</th></tr>
+        </thead>
+        <tbody id="hoTbody"></tbody>
+      </table>
+    </div>
+  </div>
+
+</div><!-- /#areaApp -->
+
+<script>
+(function () {
+  // ★★★ 카카오맵 JavaScript 키 입력 ★★★
+  var KAKAO_KEY = "2f2a97f31228e620d414890bbcfc4218";
+
+  var API_BASE = "https://area-checker.vercel.app/api/area";
+  var _allData = null, _selectedFloor = null;
+  var _kakaoMap = null, _kakaoMarker = null, _kakaoReady = false;
+
+  /* ── 유틸 ── */
+  function fmt(m2, py) {
+    if (m2 == null) return "-";
+    return m2.toLocaleString() + " ㎡ (" + (py != null ? py.toLocaleString() : "-") + " 평)";
+  }
+  function floorLabel(k) {
+    var s = String(k);
+    return s.charAt(0) === "B" ? "지하" + s.slice(1) + "층" : s + "층";
+  }
+  function showErr(msg) {
+    var b = document.getElementById("errBox");
+    if (b) { b.textContent = msg; b.style.display = "block"; }
+  }
+  function clearErr() {
+    var b = document.getElementById("errBox");
+    if (b) { b.textContent = ""; b.style.display = "none"; }
+  }
+  function setHoMsg(msg) {
+    var el = document.getElementById("hoMessage");
+    if (el) el.textContent = msg || "";
+  }
+  function hide(id) { var el = document.getElementById(id); if (el) el.style.display = "none"; }
+  function show(id, d) { var el = document.getElementById(id); if (el) el.style.display = d || "block"; }
+  function setText(id, txt) { var el = document.getElementById(id); if (el) el.textContent = txt; }
+
+  function buildUrl(params) {
+    var parts = [];
+    for (var k in params) {
+      if (Object.prototype.hasOwnProperty.call(params, k))
+        parts.push(encodeURIComponent(k) + "=" + encodeURIComponent(params[k]));
+    }
+    return API_BASE + "?" + parts.join("&");
+  }
+  function apiFetch(params, onOk, onErr) {
+    fetch(buildUrl(params))
+      .then(function (r) { return r.json(); })
+      .then(function (d) { onOk(d); })
+      .catch(function (e) { onErr(e); });
+  }
+
+  /* ── 카카오맵 ── */
+  function loadKakao(cb) {
+    if (_kakaoReady) { cb(); return; }
+    if (window._kakaoLoading) {
+      var t = setInterval(function () { if (_kakaoReady) { clearInterval(t); cb(); } }, 200);
+      return;
+    }
+    if (!KAKAO_KEY || KAKAO_KEY === "여기에_카카오_JavaScript_키_입력") return;
+    window._kakaoLoading = true;
+    var s = document.createElement("script");
+    s.src = "//dapi.kakao.com/v2/maps/sdk.js?appkey=" + KAKAO_KEY + "&libraries=services&autoload=false";
+    s.onload = function () {
+      kakao.maps.load(function () { _kakaoReady = true; window._kakaoLoading = false; cb(); });
+    };
+    s.onerror = function () { window._kakaoLoading = false; };
+    document.head.appendChild(s);
+  }
+
+  function initMap(lat, lng, addr) {
+    var div = document.getElementById("kakaoMap");
+    var card = document.getElementById("mapCard");
+    if (!div || !card) return;
+    card.style.display = "block";
+    hide("mapFallback");
+    div.style.display = "block";
+    var ll = new kakao.maps.LatLng(lat, lng);
+    if (_kakaoMap) {
+      _kakaoMap.setCenter(ll); _kakaoMap.setLevel(3);
+      if (_kakaoMarker) _kakaoMarker.setPosition(ll);
+    } else {
+      var map = new kakao.maps.Map(div, { center: ll, level: 3 });
+      _kakaoMap = map;
+      _kakaoMarker = new kakao.maps.Marker({ position: ll, map: map });
+      map.addControl(new kakao.maps.ZoomControl(), kakao.maps.ControlPosition.RIGHT);
+      map.addOverlayMapTypeId(kakao.maps.MapTypeId.USE_DISTRICT);
+      document.getElementById("btnDistrict").classList.add("active");
+      document.getElementById("btnNormal").classList.remove("active");
+      new kakao.maps.InfoWindow({
+        content: '<div style="padding:5px 8px;font-size:.8rem;font-weight:600;color:#1e3a8a;white-space:nowrap;">' + addr + '</div>',
+        removable: false
+      }).open(map, _kakaoMarker);
+    }
+    setText("mapAddrLabel", addr);
+    var ext = document.getElementById("kakaoMapLink");
+    if (ext) {
+      ext.href = "https://map.kakao.com/link/map/" + encodeURIComponent(addr) + "," + lat + "," + lng;
+      ext.style.display = "inline-block";
+    }
+  }
+
+  function showFallback(addr) {
+    show("mapCard"); hide("kakaoMap");
+    var fb = document.getElementById("mapFallback"); if (fb) fb.style.display = "flex";
+    setText("mapAddrLabel", addr || "");
+    var lk = document.getElementById("mapFallbackLink");
+    if (lk) lk.href = "https://map.kakao.com/link/search/" + encodeURIComponent(addr || "");
+  }
+
+  function showMap(addr) {
+    if (!KAKAO_KEY || KAKAO_KEY === "여기에_카카오_JavaScript_키_입력") { showFallback(addr); return; }
+    loadKakao(function () {
+      if (!window.kakao || !kakao.maps) { showFallback(addr); return; }
+      new kakao.maps.services.Geocoder().addressSearch(addr, function (res, st) {
+        if (st === kakao.maps.services.Status.OK) initMap(parseFloat(res[0].y), parseFloat(res[0].x), addr);
+        else showFallback(addr);
+      });
+    });
+  }
+
+  function setMapType(type) {
+    if (!_kakaoMap) return;
+    _kakaoMap.removeOverlayMapTypeId(kakao.maps.MapTypeId.USE_DISTRICT);
+    _kakaoMap.setMapTypeId(kakao.maps.MapTypeId.ROADMAP);
+    document.getElementById("btnNormal").classList.remove("active");
+    document.getElementById("btnDistrict").classList.remove("active");
+    document.getElementById("btnSky").classList.remove("active");
+    if (type === "district") {
+      _kakaoMap.addOverlayMapTypeId(kakao.maps.MapTypeId.USE_DISTRICT);
+      document.getElementById("btnDistrict").classList.add("active");
+    } else if (type === "skyview") {
+      _kakaoMap.setMapTypeId(kakao.maps.MapTypeId.HYBRID);
+      document.getElementById("btnSky").classList.add("active");
+    } else {
+      document.getElementById("btnNormal").classList.add("active");
+    }
+  }
+
+  /* ── 주소 조회 ── */
+  function doSearch() {
+    var el = document.getElementById("addrInput"); if (!el) return;
+    var addr = el.value.replace(/^\s+|\s+$/g, "");
+    if (!addr) { showErr("주소를 입력해주세요."); return; }
+    clearErr();
+    var btn = document.getElementById("searchBtn");
+    if (btn) { btn.disabled = true; btn.textContent = "조회 중..."; }
+    show("summaryCard");
+    setText("summaryInput", addr); setText("summaryRoad", "-"); setText("summaryJibun", "-");
+    hide("floorBtns"); hide("floorCard"); hide("mapCard"); show("loadingMsg");
+    _allData = null; _selectedFloor = null;
+    apiFetch({ address: addr, mode: "all" },
+      function (data) {
+        hide("loadingMsg");
+        if (btn) { btn.disabled = false; btn.textContent = "조회"; }
+        if (!data.ok) { showErr(data.message || "조회에 실패했습니다."); return; }
+        _allData = data;
+        setText("summaryRoad", data.road || "-");
+        setText("summaryJibun", data.jibun || "-");
+        if (data.road) showMap(data.road);
+        renderFloorBtns(data.floor_nos || []);
+        var nos = data.floor_nos || [], first = null;
+        for (var i = 0; i < nos.length; i++) {
+          if (String(nos[i]).charAt(0) !== "B") { first = String(nos[i]); break; }
+        }
+        if (first) selectFloor(first);
+      },
+      function (err) {
+        hide("loadingMsg");
+        if (btn) { btn.disabled = false; btn.textContent = "조회"; }
+        showErr("네트워크 오류: " + (err && err.message ? err.message : String(err)));
+      }
+    );
+  }
+
+  function renderFloorBtns(nos) {
+    var wrap = document.getElementById("floorBtnWrap"); if (!wrap) return;
+    wrap.innerHTML = "";
+    for (var i = 0; i < nos.length; i++) {
+      (function (f) {
+        var b = document.createElement("button");
+        b.className = "ac-floor-btn";
+        b.textContent = floorLabel(String(f));
+        b.setAttribute("data-floor", String(f));
+        b.addEventListener("click", function () { selectFloor(String(f)); });
+        wrap.appendChild(b);
+      })(nos[i]);
+    }
+    show("floorBtns");
+  }
+
+  function selectFloor(fk) {
+    if (!_allData) return;
+    _selectedFloor = fk;
+    var btns = document.querySelectorAll(".ac-floor-btn");
+    for (var i = 0; i < btns.length; i++) {
+      if (btns[i].getAttribute("data-floor") === fk) btns[i].classList.add("active");
+      else btns[i].classList.remove("active");
+    }
+    var fd = _allData.floors_data && _allData.floors_data[fk];
+    if (!fd) { hide("floorCard"); return; }
+    renderFloor(fk, fd);
+  }
+
+  function renderFloor(fk, fd) {
+    show("floorCard");
+    setText("floorTitle", floorLabel(fk) + " 상세");
+    var pick = fd.pick;
+    setText("floorMeta", pick
+      ? "대표 면적: " + pick.area_m2.toLocaleString() + " ㎡ (" + pick.area_pyeong.toLocaleString() + " 평)"
+      : "");
+    var tb = document.getElementById("floorTbody");
+    if (tb) {
+      tb.innerHTML = "";
+      var items = fd.floor_items || [];
+      for (var i = 0; i < items.length; i++) {
+        var it = items[i], tr = document.createElement("tr");
+        tr.innerHTML = "<td>" + (it.gb||"-") + "</td><td>" + (it.use||"-") + "</td><td>" + (it.detail||"-") + "</td><td>"
+          + (it.area_m2||0).toLocaleString() + "</td><td>" + (it.area_pyeong||0).toLocaleString() + "</td>";
+        tb.appendChild(tr);
+      }
+    }
+    var sel = document.getElementById("hoSelect");
+    if (sel) {
+      sel.innerHTML = "";
+      var eo = document.createElement("option"); eo.value = ""; eo.textContent = "- 호실 선택 -";
+      sel.appendChild(eo);
+      var hl = fd.ho_list || [];
+      for (var j = 0; j < hl.length; j++) {
+        var hn = hl[j], op = document.createElement("option"); op.value = hn;
+        var nm = hn.match(/\d+/) ? hn.match(/\d+/)[0] : null;
+        var idx = nm && fd.ho_index ? fd.ho_index[nm] : null;
+        op.textContent = (idx && idx.exclusive_m2)
+          ? hn + " (전유 " + idx.exclusive_m2 + " ㎡ / " + idx.exclusive_pyeong + " 평)"
+          : hn;
+        sel.appendChild(op);
+      }
+    }
+    setHoMsg(fd.ho_list_note || "");
+    hide("hoResult");
+    var hi = document.getElementById("hoInput"); if (hi) hi.value = "";
+  }
+
+  function doHoSearch() {
+    if (!_allData || !_selectedFloor) { setHoMsg("층을 먼저 선택해주세요."); return; }
+    var ie = document.getElementById("hoInput");
+    var se = document.getElementById("hoSelect");
+    var ho = (ie && ie.value.replace(/^\s+|\s+$/g, "")) || (se && se.value.replace(/^\s+|\s+$/g, ""));
+    if (!ho) { setHoMsg("호실을 선택하거나 직접 입력해주세요."); return; }
+    var fd = _allData.floors_data && _allData.floors_data[_selectedFloor];
+    if (!fd) { setHoMsg("층 데이터가 없습니다."); return; }
+    var bd = fd.ho_breakdown && fd.ho_breakdown[ho];
+    if (bd === undefined) {
+      var norm = ho.match(/\d+/) ? ho.match(/\d+/)[0] : null, matched = null;
+      if (norm && fd.ho_breakdown) {
+        var ks = Object.keys(fd.ho_breakdown);
+        for (var i = 0; i < ks.length; i++) {
+          var m = ks[i].match(/\d+/);
+          if (m && m[0] === norm) { matched = ks[i]; break; }
+        }
+      }
+      if (matched) renderHoResult(matched, fd.ho_breakdown[matched]);
+      else { setHoMsg("'" + ho + "' 호실 데이터를 찾지 못했습니다."); hide("hoResult"); }
+      return;
+    }
+    if (bd === null) { setHoMsg("'" + ho + "' 호실의 면적 데이터가 공공 API에 없습니다."); hide("hoResult"); return; }
+    renderHoResult(ho, bd);
+  }
+
+  function renderHoResult(hn, bd) {
+    if (!bd) return;
+    var s = bd.sum; setHoMsg("");
+    setText("resExclusive", fmt(s.exclusive_m2, s.exclusive_pyeong));
+    setText("resShared",    fmt(s.shared_m2,    s.shared_pyeong));
+    setText("resTotal",     fmt(s.total_m2,     s.total_pyeong));
+    var htb = document.getElementById("hoTbody");
+    if (htb) {
+      htb.innerHTML = "";
+      var rows = bd.breakdown || [];
+      for (var i = 0; i < rows.length; i++) {
+        var r = rows[i], tr = document.createElement("tr");
+        tr.innerHTML = "<td>" + (r.gb||"-") + "</td><td>" + (r.flrNm||"-") + "</td><td>" + (r.use||"-") + "</td><td>"
+          + (r.area_m2||0).toLocaleString() + "</td><td>" + (r.area_pyeong||0).toLocaleString() + "</td>";
+        htb.appendChild(tr);
+      }
+      if (bd.source === "exposInfo_fallback") {
+        var tr2 = document.createElement("tr");
+        tr2.innerHTML = '<td colspan="5" style="color:#888;font-size:.8rem">※ 전유/공용 상세 데이터 없음</td>';
+        htb.appendChild(tr2);
+      }
+    }
+    show("hoResult");
+  }
+
+  /* ── 이벤트 바인딩 (addEventListener, onclick 없음) ── */
+  document.getElementById("searchBtn").addEventListener("click", doSearch);
+  document.getElementById("addrInput").addEventListener("keydown", function (e) {
+    if (e.key === "Enter") doSearch();
+  });
+  document.getElementById("hoBtn").addEventListener("click", doHoSearch);
+  document.getElementById("hoInput").addEventListener("keydown", function (e) {
+    if (e.key === "Enter") doHoSearch();
+  });
+  document.getElementById("btnNormal").addEventListener("click", function () { setMapType("normal"); });
+  document.getElementById("btnDistrict").addEventListener("click", function () { setMapType("district"); });
+  document.getElementById("btnSky").addEventListener("click", function () { setMapType("skyview"); });
+
+})();
+</script>
+</body>
+</html>

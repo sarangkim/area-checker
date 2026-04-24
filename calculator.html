@@ -2,16 +2,20 @@
 <html lang="ko">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
 <title>평수 계산기</title>
 <style>
 * { box-sizing: border-box; margin: 0; padding: 0; }
-body {
+html, body {
   font-family: 'Noto Sans KR', sans-serif;
   background: #f8fafc;
-  padding: 16px;
+  padding: 0; margin: 0;
+  overflow-x: hidden;
+  /* iframe 높이 자동조절: body가 콘텐츠 높이에 맞게 늘어남 */
+  height: auto;
+  min-height: 100%;
 }
-#areaApp { width: 100%; max-width: 800px; margin: 0 auto; }
+#areaApp { width: 100%; padding: 12px; max-width: 860px; margin: 0 auto; }
 .ac-card {
   background: #fff;
   border: 1px solid #e0e0e0;
@@ -107,11 +111,14 @@ body {
 .ac-result-label { color: #555; }
 .ac-result-val   { font-weight: 600; color: #1e3a8a; }
 @media (max-width: 480px) {
-  body { padding: 8px; }
+  #areaApp { padding: 8px; }
   .ac-card { padding: 14px; }
   .ac-title { font-size: 1.1rem; }
   .ac-btn { padding: 10px 14px; font-size: .9rem; }
-  #kakaoMap { height: 260px !important; }
+  .ac-table { font-size: .8rem; }
+  .ac-table th, .ac-table td { padding: 6px 6px; }
+  #kakaoMap { height: 240px !important; }
+  .ac-map-type-btn { padding: 4px 8px; font-size: .75rem; }
 }
 </style>
 </head>
@@ -144,14 +151,13 @@ body {
         <button class="ac-map-type-btn" id="btnNormal">일반</button>
         <button class="ac-map-type-btn active" id="btnDistrict">지적편집도</button>
         <button class="ac-map-type-btn" id="btnSky">위성</button>
-        <a id="kakaoMapLink" href="#" target="_blank" class="ac-map-ext-btn" style="display:none">카카오맵에서 보기 ↗</a>
+        <a id="kakaoMapLink" href="#" target="_blank" class="ac-map-ext-btn" style="display:none">카카오맵 ↗</a>
       </div>
     </div>
-    <div id="kakaoMap" style="width:100%; height:380px;"></div>
-    <div id="mapFallback" style="display:none; width:100%; height:220px; background:#f1f5f9; align-items:center; justify-content:center; flex-direction:column; gap:12px;">
-      <div style="font-size:2rem">🗺️</div>
+    <div id="kakaoMap" style="width:100%; height:360px;"></div>
+    <div id="mapFallback" style="display:none; width:100%; height:120px; background:#f1f5f9; align-items:center; justify-content:center; flex-direction:column; gap:10px;">
       <div style="color:#64748b; font-size:.9rem; text-align:center;">
-        <a id="mapFallbackLink" href="#" target="_blank" style="color:#2563eb; text-decoration:underline;">카카오맵에서 보기 ↗</a>
+        📍 <a id="mapFallbackLink" href="#" target="_blank" style="color:#2563eb; text-decoration:underline; font-weight:600;">카카오맵에서 위치 보기 ↗</a>
       </div>
     </div>
   </div>
@@ -221,12 +227,32 @@ body {
 
 <script>
 (function () {
-  // ★★★ 카카오맵 JavaScript 키 입력 ★★★
+  /* ── 카카오 키 ── */
   var KAKAO_KEY = "2f2a97f31228e620d414890bbcfc4218";
+  var API_BASE  = "https://area-checker.vercel.app/api/area";
 
-  var API_BASE = "https://area-checker.vercel.app/api/area";
   var _allData = null, _selectedFloor = null;
   var _kakaoMap = null, _kakaoMarker = null, _kakaoReady = false;
+
+  /* ── iframe 높이: parent에 postMessage 전송 ── */
+  function sendHeight() {
+    var app = document.getElementById('areaApp');
+    if (!app) return;
+    var h = Math.max(app.scrollHeight, app.offsetHeight) + 40;
+    try { window.parent.postMessage({ type: 'calcHeight', height: h }, '*'); } catch(e){}
+    // document.body 높이도 직접 설정 (일부 브라우저 대응)
+    try { document.body.style.minHeight = h + 'px'; } catch(e){}
+  }
+  // DOM 변경될 때마다 높이 전송
+  if (window.MutationObserver) {
+    new MutationObserver(function() {
+      setTimeout(sendHeight, 50);
+    }).observe(document.body, { childList: true, subtree: true });
+  }
+  // 500ms마다 체크 (지속적으로)
+  setInterval(sendHeight, 500);
+  window.addEventListener('load', sendHeight);
+  window.addEventListener('resize', sendHeight);
 
   /* ── 유틸 ── */
   function fmt(m2, py) {
@@ -275,7 +301,7 @@ body {
       var t = setInterval(function () { if (_kakaoReady) { clearInterval(t); cb(); } }, 200);
       return;
     }
-    if (!KAKAO_KEY || KAKAO_KEY === "여기에_카카오_JavaScript_키_입력") return;
+    if (!KAKAO_KEY) return;
     window._kakaoLoading = true;
     var s = document.createElement("script");
     s.src = "//dapi.kakao.com/v2/maps/sdk.js?appkey=" + KAKAO_KEY + "&libraries=services&autoload=false";
@@ -287,7 +313,7 @@ body {
   }
 
   function initMap(lat, lng, addr) {
-    var div = document.getElementById("kakaoMap");
+    var div  = document.getElementById("kakaoMap");
     var card = document.getElementById("mapCard");
     if (!div || !card) return;
     card.style.display = "block";
@@ -316,18 +342,21 @@ body {
       ext.href = "https://map.kakao.com/link/map/" + encodeURIComponent(addr) + "," + lat + "," + lng;
       ext.style.display = "inline-block";
     }
+    sendHeight();
   }
 
   function showFallback(addr) {
-    show("mapCard"); hide("kakaoMap");
+    show("mapCard");
+    hide("kakaoMap");
     var fb = document.getElementById("mapFallback"); if (fb) fb.style.display = "flex";
     setText("mapAddrLabel", addr || "");
     var lk = document.getElementById("mapFallbackLink");
     if (lk) lk.href = "https://map.kakao.com/link/search/" + encodeURIComponent(addr || "");
+    sendHeight();
   }
 
   function showMap(addr) {
-    if (!KAKAO_KEY || KAKAO_KEY === "여기에_카카오_JavaScript_키_입력") { showFallback(addr); return; }
+    if (!KAKAO_KEY) { showFallback(addr); return; }
     loadKakao(function () {
       if (!window.kakao || !kakao.maps) { showFallback(addr); return; }
       new kakao.maps.services.Geocoder().addressSearch(addr, function (res, st) {
@@ -367,11 +396,12 @@ body {
     setText("summaryInput", addr); setText("summaryRoad", "-"); setText("summaryJibun", "-");
     hide("floorBtns"); hide("floorCard"); hide("mapCard"); show("loadingMsg");
     _allData = null; _selectedFloor = null;
+    sendHeight();
     apiFetch({ address: addr, mode: "all" },
       function (data) {
         hide("loadingMsg");
         if (btn) { btn.disabled = false; btn.textContent = "조회"; }
-        if (!data.ok) { showErr(data.message || "조회에 실패했습니다."); return; }
+        if (!data.ok) { showErr(data.message || "조회에 실패했습니다."); sendHeight(); return; }
         _allData = data;
         setText("summaryRoad", data.road || "-");
         setText("summaryJibun", data.jibun || "-");
@@ -382,11 +412,13 @@ body {
           if (String(nos[i]).charAt(0) !== "B") { first = String(nos[i]); break; }
         }
         if (first) selectFloor(first);
+        sendHeight();
       },
       function (err) {
         hide("loadingMsg");
         if (btn) { btn.disabled = false; btn.textContent = "조회"; }
         showErr("네트워크 오류: " + (err && err.message ? err.message : String(err)));
+        sendHeight();
       }
     );
   }
@@ -405,6 +437,7 @@ body {
       })(nos[i]);
     }
     show("floorBtns");
+    sendHeight();
   }
 
   function selectFloor(fk) {
@@ -457,6 +490,7 @@ body {
     setHoMsg(fd.ho_list_note || "");
     hide("hoResult");
     var hi = document.getElementById("hoInput"); if (hi) hi.value = "";
+    sendHeight();
   }
 
   function doHoSearch() {
@@ -508,9 +542,10 @@ body {
       }
     }
     show("hoResult");
+    sendHeight();
   }
 
-  /* ── 이벤트 바인딩 (addEventListener, onclick 없음) ── */
+  /* ── 이벤트 바인딩 ── */
   document.getElementById("searchBtn").addEventListener("click", doSearch);
   document.getElementById("addrInput").addEventListener("keydown", function (e) {
     if (e.key === "Enter") doSearch();
@@ -523,6 +558,7 @@ body {
   document.getElementById("btnDistrict").addEventListener("click", function () { setMapType("district"); });
   document.getElementById("btnSky").addEventListener("click", function () { setMapType("skyview"); });
 
+  sendHeight();
 })();
 </script>
 </body>
